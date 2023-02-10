@@ -1,0 +1,111 @@
+---
+title: "Tidymodels_Naive_Bayes"
+author: "Johan Heinsen"  
+output: html_notebook
+---
+  
+
+Denne her notebook er et eksperiment i at bygge en såkaldt naive bayes classifier -- en algoritme, der kan klassificere tekst. Casen handler om at bestemme kønnet på efterlyste personer i 1700-tals avisannoncer. Det var en ganske almindelig praksis at efterlyse ens tyende, soldater eller arrestanter, der var løbet bort. Et sample på 925 sådanne efterlysninger fra de sidste to årtier af 1700-tallet udgør datagrundlaget. Dataene stammer fra avisen *Københavns Alene Privilegerede Adressekontors Efterretninger* -- en såkaldt "adresseavis", der i nogle henseender fungerede som et tidligt socialt medie for de øvre lag af det københavnske bysamfund. Dataene er skabt af Anders Dyrborg Birkemose.
+Den afprøvede tekstkategoriseringsalgoritme er relativt simpel. Fordelen herved er, at den let kan køres fra en ganske almindelig pc -- og at den uden stort besvær kan benyttes på andre datasæt af andre forskere eller studerende. Desuden er den faktisk også ganske effektiv. 
+
+Øvelsen med at få en algoritme til at genkende kategorier på baggrund af rå tekst er åbenlyst nyttig i tilfælde, hvor vi er interesserede i at kunne kategorisere store mængder af tekststykker -- men er begrænsede af tid, penge og/eller evnen til at fokusere på en monoton opgave. Hvis vores kategorier er entydige og tydeligt tilstede i selve vores tekstdata (i modsætning til egenskaber vi deducerer med udgangspunkt i domæneviden eller læser mellem linjer), burde vi kunne skabe en simpel model med en meningsfuld præcision. Med en trænet algoritme kan vi kategorisere så meget data, vi har (brug for).
+
+Imidlertid er metoden måske mest interessant, når den fejler. I en nylig artikel har Anders Kristian Munk, Asger Gehrt Olesen og Mathieu Jacomy beskrevet potentialerne i at benytte kunstige intelligensers fejlkategoriseringer heuristisk til at "tykne" vores forståelse af kulturelle processer.^[Anders Kristian Munk, Asger Gehrt Olsen og Mathieu Jacomy, "The Thick Machine: Anthropological AI between explanation and explication", *Big Data & Society* 9:1, 2022. https://doi.org/10.1177/20539517211069891] Jill Walker Rettberg har, inspireret af Munk, Olesen og Jacomy, lavet et tilsvarende argument og beskrevet hvordan: "Algorithmic failure uses the mispredictions of machine learning to identify cases that are of interest for qualitative research."^[Jill Walker Rettberg, "Algorithmic failure as a humanities methodology: Machine learning's mispredictions identify rich cases for qualitative analysis", *Big Data & Society* 9:2, 2022, https://doi.org/10.1177/2053951722113129]. For historikere, der husker de italienske mikrohistorikeres ide om den "normale undtagelse" -- ekstraordinære kilder, der fortæller om både normalitet og afvigelse -- synes denne metode særligt lovende. 
+
+Denne notebook er skrevet med henblik på studerende / begyndere. Den forsøger at holde sig til en begrænset mængde af pakker og at benytte så veldokumenterede funktioner som muligt. I praksis vil en højere præcision kunne etableres ved hjælp af mere avancerede, men også besværlige teknikker.
+
+
+### Setup
+
+Først loades pakker.
+```{r message = FALSE}
+library(tidyverse)
+library(readxl)
+library(tidymodels)
+```
+
+Herefter loades data. Det forudsættes at disse ligger i roden af dit projekt. Altså samme sted som din notebook eller dit script. Som et ekstra setup-element gøres datasættets kolonne "Gender" til en faktor. Dette er nødvendigt for det videre forløb.
+```{r}
+avis_samples <- read_excel("sample.xlsx")
+stopord <- read_excel("stopord2.xlsx")
+avis_samples$Gender <- as.factor(avis_samples$Gender)
+head(avis_samples)
+```
+Dataene indeholder tre kolonner: Et Id, en kolonne, der angiver det kategoriserede køn og den fulde tekst. For at kunne måle præcisionen af vores algoritme, kan vi ikke bruge alle 925 annoncer til at træne algoritmen. Vi må holde en reserve af manuelt kategoriseret data tilbage til at teste modellen efter træning. Vi splitter derfor datasættet i to: træningsdata og testdata:
+```{r}
+avis_split <- initial_split(avis_samples, strata = Gender) # Som default splitter initial_split() med proportionen 3/4
+avis_train <- training(avis_split)
+avis_test <- testing(avis_split)
+```
+
+
+### Træning af model
+
+Næste skridt er at preppe selve teksten. I udgangspunktet har maskinlæringsalgoritmer altid brug for at forstå tekstdata som kvantificerede data. For at nå til et format, der giver mening for den teknik, der bruges her, definerer vi en opskrift for, hvordan teksterne omformes til talværdier. Opskriften indeholder følgende elementer:
+
+* Vi tokeniserer -- altså opdeler -- på ordniveau. 
+* Vi fjerner stopord fra den manuelle stopordsliste, vi loadede ind tidligere.
+* Vi filtrerer, så vi kun beholder de 1000 mest hyppige ord. Den mest nyttige tærskel vil variere afhængigt af data.
+* Vi udregner en term-frequency, hvor vægtningen er binær. Det betyder at hvert ord er noteret med 0 hvis det ikke er tilstede og med 1 hvis det er tilstede, men at antallet af optrædener ikke er angivet.
+* Vi bruger denne struktur som udgangspunkt for en såkaldt PCA (principal components analysis), der reducerer antallet af dimensioner i data. Dette gøres fordi vores algoritme ikke kan håndtere den store mængde af forskellige ord, der nu optræder som kolonner, der skal bruges til at forudsige kønnet ("features"), men lettere kan forholde sig til disse, hvis de reduceres til et overskueligt antal "dimensioner". I denne proces går noget af kompleksiteten i vores data tabt, imod at dataene bliver håndterbare for algoritmen. I andre kontekster er dette skridt måske ikke nødvendigt. Antallet af dimensioner, der er nyttige at bevare, vil variere afhængigt af data.
+
+I mange kontekster ville det have været nyttigt at standardisere teksterne yderligere f.eks. ved at opstamme ord, så variationer i endelser kan ignoreres. Der findes imidlertid ikke pt. algoritmer der kan gøre dette tilfredsstillende på materiale fra denne periode.
+```{r}
+library(textrecipes)
+
+avis_rec <- recipe(Gender ~ Text, data = avis_train) %>%
+  step_tokenize(Text) %>%
+  step_stopwords(Text, custom_stopword_source = stopord$word) %>% 
+  step_tokenfilter(Text, max_tokens = 1000) %>%
+  step_tf(Text, weight_scheme = "binary") %>% 
+  step_normalize(all_predictors()) %>%
+  step_pca(all_predictors(), num_comp = 8, id = "pca")
+
+avis_baked <- prep(avis_rec) %>% bake(new_data = NULL) # dette trin er udelukkende for at foretage en manuel vurdering om hvorvidt opskriften gør, hvad den skal
+
+head(avis_baked)
+```
+Som næste skridt defineres vores model, der knyttes til vores opskrift i et workflow. Til sidst fittes/trænes modellen.
+```{r}
+library(discrim)
+nb_spec <- naive_Bayes(Laplace = 0.5) %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes")
+
+avis_wf <- workflow() %>%
+  add_recipe(avis_rec) %>% 
+  add_model(nb_spec)
+
+nb_fit <- avis_wf %>%
+  fit(data = avis_train)
+```
+
+
+### Hvad lærer maskinen -- og hvad lærer vi?
+
+Hvordan klarer modellen sig? Fordi vi har tilbageholdt noget data kan vi teste modellen på netop dette data, der altså er ukendt for modellen. For hver gang vi kører denne notebook splittes dataene forskelligt, og præcisionen vil tilsvarende svinge. Generelt får vi dog en præcision, på den fornuftige side af 90. Algoritmen har med andre ord, i langt de fleste tilfælde, succes med at identificere den efterlyste persons køn på baggrund af teksten.
+```{r}
+avis_nb_final_fit <- last_fit(avis_wf, split = avis_split)
+avis_predictions <- collect_predictions(avis_nb_final_fit)
+collect_metrics(avis_nb_final_fit)
+```
+Men hvad med de tekster, hvor algoritmen fejler? Lad os identificere de annoncer, hvor modellen læser forkert. Er der noget særligt ved dem?
+```{r message = FALSE}
+avis_prediction_fail <- avis_predictions %>% 
+  mutate(success = .pred_class == Gender) %>% 
+  mutate(ID = as.character(.row)) %>% 
+  select(ID, success) %>%
+  filter(success == FALSE)
+
+avis_prediction_fail_text <- avis_samples %>%
+  mutate(ID = str_remove(avis_samples$ID, pattern = "ID-")) %>%
+  right_join(avis_prediction_fail)
+
+avis_prediction_fail_text$Text
+```
+Her ser vi teksten på de af test-dataenes 232 annoncer, hvor algoritmen giver en forkert angivelse af kønnet. Dette kan gøre os klogere på dataenes tekstur. Hvor machine learning og datavisualiseringsteknikker ofte kritiseres for at repræsentere data som homogene, uproblematiske og glatte, kan algoritmens fejl pege os i retning af mønstre, hvor dataene er tvetydige. Den kan derved berige vores forståelse af dataene. Fordi vi selv læser efter et navn, når vi søger at kategorisere et køn, men computeren ikke kan kende forskel på navne og andre ord, peger den således på annoncer, hvor kvinder omtales i termer, mænd normalt omtales i -- og omvendt.
+
+Et gennemgående træk, der står frem er, at possessive pronomener tilsyneladende kønner genren. "Min" og "mit" er hyppige i annoncer om kvinder, der efterlyses af en husbond. Når disse pronomener optræder i annoncer om mænd forvirres modellen i nogle tilfælde. Husstanden som en juridisk sfære knyttes dermed til et sprog struktureret af køn. Fordi annoncer om kvinder ofte er mindre deskriptive ifht. udseende, forvirres modellen ydermere, når kvinders udseende eller tøj beskrives detaljeret. Kvinder der har begået noget kriminelt eller udgør et problem grundet gæld, kønnes ligeledes af og til som mænd af algoritmen. Måske påvirkes algoritmen her også af, at annoncer om kvinder generelt er kortere end dem om mænd, men at dette mønster brydes netop i annoncer om mænd (ofte "drenge") indrykket af private arbejdsgivere -- og af annoncer, hvor omstændigheder betyder, at kvinderne efterlyses med flere narrative og/eller beskrivende elementer.
+
+Algoritmens fejllæsninger fortæller os således om materialet som en del af en fundamentalt kønnet genre. Dette kan udgøre et supplement eller et korrektiv til vores øvrige analyser -- uanset om disse sigter på kvalitativ eller kvantitativ brug af materialet. Det kan kort sagt hjælpe os til at stille mere kvalificerede spørgsmål til vores data.
+
